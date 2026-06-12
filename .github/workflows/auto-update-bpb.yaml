@@ -1,1 +1,72 @@
+name: Auto Update Custom BPB Worker
 
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 初始化仓库
+        uses: actions/checkout@v4
+
+      - name: 获取当前本地版本
+        id: get_local_version
+        run: |
+          if [ -f version.txt ]; then
+            LOCAL_VERSION=$(cat version.txt | tr -d '[:space:]')
+          else
+            LOCAL_VERSION="v0.0.0"
+          fi
+          echo "LOCAL_VERSION=$LOCAL_VERSION" >> $GITHUB_ENV
+
+      - name: 从原版仓库获取最新 Release
+        id: get_release
+        run: |
+          TARGET_REPO="bia-pain-bache/BPB-Worker-Panel"
+          API_URL="https://api.github.com/repos/$TARGET_REPO/releases"
+          RESPONSE=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" "$API_URL")
+          LATEST_RELEASE=$(echo "$RESPONSE" | jq -r '.[0]')
+          TAG_NAME=$(echo "$LATEST_RELEASE" | jq -r '.tag_name' | tr -d '[:space:]')
+          DOWNLOAD_URL=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -n 1)
+          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" == "null" ]; then exit 1; fi
+          echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
+          echo "DOWNLOAD_URL=$DOWNLOAD_URL" >> $GITHUB_ENV
+
+      - name: 判断是否需要更新
+        id: check_update
+        run: |
+          if [ "${{ env.LOCAL_VERSION }}" = "${{ env.TAG_NAME }}" ]; then
+            echo "UPDATE_NEEDED=false" >> $GITHUB_ENV
+          else
+            echo "UPDATE_NEEDED=true" >> $GITHUB_ENV
+          fi
+
+      - name: 执行更新同步
+        if: env.UPDATE_NEEDED == 'true'
+        run: |
+          find . -maxdepth 1 ! -name '.' ! -name '.git' ! -name '.github' -exec rm -rf {} +
+          wget -O latest_panel.zip "${{ env.DOWNLOAD_URL }}"
+          unzip -q latest_panel.zip
+          if [ -d "BPB-Worker-Panel" ]; then
+            cp -r BPB-Worker-Panel/* ./
+            rm -rf BPB-Worker-Panel
+          fi
+          rm -f latest_panel.zip
+          echo "${{ env.TAG_NAME }}" > version.txt
+
+      - name: 提交更改
+        if: env.UPDATE_NEEDED == 'true'
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "🔄 自动同步原版 BPB Worker Release"
+          commit_author: "github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
+          push_options: --force
